@@ -1,0 +1,10 @@
+[package]
+name = "pam-sshd-oom"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[lib]
+name = "pam_sshd_oom"
+crate-type = ["cdylib"] 
