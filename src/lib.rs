@@ -1,4 +1,10 @@
-use std::{fs::{OpenOptions}, io::Write, os::raw::{c_char, c_int}};
+use anyhow::{Context, Result};
+use std::{
+    ffi::CStr,
+    fs::OpenOptions,
+    io::Write,
+    os::raw::{c_char, c_int},
+};
 
 // PAM constants
 pub const PAM_SUCCESS: c_int = 0;
@@ -50,14 +56,44 @@ pub struct PamHandle {
 }
 
 // PAM session management functions
+/// # Safety
+/// This function is called by the PAM framework and expects valid pointers for all arguments.
+/// The caller must ensure that `pamh` and `argv` are valid for the duration of the call.
 #[unsafe(no_mangle)]
-pub extern "C" fn pam_sm_open_session(
-    pamh: *mut PamHandle,
-    flags: c_int,
+pub unsafe extern "C" fn pam_sm_open_session(
+    _pamh: *mut PamHandle,
+    _flags: c_int,
     argc: c_int,
     argv: *const *const c_char,
 ) -> c_int {
-    set_oom_adj_score()
+    let mut score = 0;
+
+    // Properly handle null argv
+    if argc > 0 && !argv.is_null() {
+        unsafe {
+            let first_arg_ptr = *argv.offset(0);
+            if !first_arg_ptr.is_null() {
+                if let Ok(arg_str) = CStr::from_ptr(first_arg_ptr).to_str() {
+                    if let Ok(num) = arg_str.parse::<i32>() {
+                        score = num;
+                    }
+                }
+            }
+        }
+    }
+
+    if !(-1000..=1000).contains(&score) {
+        score = 0;
+    }
+
+    match set_oom_adj_score(score) {
+        Ok(_) => PAM_SUCCESS,
+        Err(msg) => {
+            println!("PAM_SSHD_OOM: Failed to adjust user OOM Adjust Score.");
+            println!("PAM_SSHD_OOM: {msg}");
+            PAM_IGNORE
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -68,7 +104,7 @@ pub extern "C" fn pam_sm_close_session(
     _argv: *const *const c_char,
 ) -> c_int {
     PAM_SUCCESS
-} 
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_acct_mgmt(
@@ -90,7 +126,6 @@ pub extern "C" fn pam_sm_setcred(
     PAM_SERVICE_ERR
 }
 
-
 #[unsafe(no_mangle)]
 pub extern "C" fn pam_sm_chauthtok(
     pamh: *mut PamHandle,
@@ -101,22 +136,17 @@ pub extern "C" fn pam_sm_chauthtok(
     PAM_SERVICE_ERR
 }
 
-fn set_oom_adj_score() -> c_int {
-    let mut file = match OpenOptions::new().write(true).open("/proc/self/oom_score_adj") {
-        Ok(file) => {
-            file
-        },
-        Err(_) => {
-            println!("PAM_SSHD_OOM: Failed to set higher user OOM Adjust Score.");
-            return PAM_IGNORE
-        }
-    };
-    match file.write_all(b"1000") {
-        Ok(_) => (),
-        Err(_) => {
-            println!("PAM_SSHD_OOM: Failed to set higher user OOM Adjust Score.");
-            return PAM_IGNORE
-        }
-    };
-    PAM_SUCCESS
+fn set_oom_adj_score(score: i32) -> Result<c_int> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open("/proc/self/oom_score_adj")
+        .context("Failed to open /proc/self/oom_score_adj.")?;
+    file.write_all(score.to_string().as_bytes()).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to write OOM Adjust score {score} to /proc/self/oom_score_adj: {}",
+            e
+        )
+    })?;
+
+    Ok(PAM_SUCCESS)
 }
